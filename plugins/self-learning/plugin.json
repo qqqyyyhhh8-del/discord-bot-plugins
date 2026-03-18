@@ -1,0 +1,39 @@
+{
+  "id": "official_self_learning",
+  "name": "Official Self Learning Plugin",
+  "version": "v0.3.0",
+  "description": "Self-learning memory provider with layered memory, structured retrieval, automatic persona sync, relationship analysis, and an embedded web console.",
+  "min_host_version": "v0.6.3",
+  "runtime": {
+    "command": "go",
+    "args": ["run", "./cmd/self-learning-plugin"]
+  },
+  "capabilities": [
+    "discord.interaction.respond",
+    "context.provide",
+    "persona.read",
+    "persona.write",
+    "plugin.records.read",
+    "plugin.records.write",
+    "worldbook.write",
+    "llm.chat",
+    "llm.embed",
+    "llm.rerank"
+  ],
+  "dependencies": [
+    {
+      "id": "official_persona",
+      "min_version": "v0.1.0"
+    }
+  ],
+  "commands": [
+    {
+      "name": "memory",
+      "description": "Open the self-learning memory panel."
+    }
+  ],
+  "component_prefixes": [
+    "memory:"
+  ],
+  "interval_seconds": 300
+}

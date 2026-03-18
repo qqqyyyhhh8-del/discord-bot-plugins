@@ -29,28 +29,39 @@ const (
 	personaPromptOptionRunes  = 90
 )
 
-type personaState struct {
+type legacyPersonaState struct {
 	Personas map[string]string `json:"personas"`
 	Active   string            `json:"active"`
+}
+
+type personaState struct {
+	Scope    pluginapi.PersonaScope
+	Personas map[string]pluginapi.PersonaEntry
+	Active   string
 }
 
 type personaPlugin struct {
 	pluginapi.BasePlugin
 }
 
+func (p *personaPlugin) Initialize(ctx context.Context, host *pluginapi.HostClient, request pluginapi.InitializeRequest) error {
+	return migrateLegacyState(ctx, host)
+}
+
 func (p *personaPlugin) OnSlashCommand(ctx context.Context, host *pluginapi.HostClient, request pluginapi.SlashCommandRequest) (*pluginapi.InteractionResponse, error) {
-	return personaPanelMessage(ctx, host, request.User, "")
+	return personaPanelMessage(ctx, host, scopeFromLocation(request.Guild.ID, request.Channel), request.User, "")
 }
 
 func (p *personaPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClient, request pluginapi.ComponentRequest) (*pluginapi.InteractionResponse, error) {
-	state, err := loadPersonaState(ctx, host)
+	scope := scopeFromLocation(request.Guild.ID, request.Channel)
+	state, err := loadPersonaState(ctx, host, scope)
 	if err != nil {
 		return nil, err
 	}
 
 	switch strings.TrimSpace(request.CustomID) {
 	case personaActionRefresh:
-		return personaPanelUpdate(state, request.User, "已刷新人设面板。"), nil
+		return personaPanelUpdate(state, request.User, "已刷新当前作用域的人设面板。"), nil
 	case personaActionOpenUpsert:
 		if !request.User.IsAdmin {
 			return personaPanelUpdate(state, request.User, "你没有权限执行这个操作。"), nil
@@ -78,9 +89,11 @@ func (p *personaPlugin) OnComponent(ctx context.Context, host *pluginapi.HostCli
 		if active == "" {
 			return personaPanelUpdate(state, request.User, "当前没有启用中的人设，无法删除。"), nil
 		}
-		delete(state.Personas, active)
-		state.Active = ""
-		if err := savePersonaState(ctx, host, state); err != nil {
+		if err := host.PersonaDelete(ctx, state.Scope, active); err != nil {
+			return nil, err
+		}
+		state, err = loadPersonaState(ctx, host, scope)
+		if err != nil {
 			return nil, err
 		}
 		return personaPanelUpdate(state, request.User, fmt.Sprintf("已删除人设: %s", active)), nil
@@ -91,8 +104,11 @@ func (p *personaPlugin) OnComponent(ctx context.Context, host *pluginapi.HostCli
 		if strings.TrimSpace(state.Active) == "" {
 			return personaPanelUpdate(state, request.User, "当前没有启用中的人设。"), nil
 		}
-		state.Active = ""
-		if err := savePersonaState(ctx, host, state); err != nil {
+		if err := host.PersonaClearActive(ctx, state.Scope); err != nil {
+			return nil, err
+		}
+		state, err = loadPersonaState(ctx, host, scope)
+		if err != nil {
 			return nil, err
 		}
 		return personaPanelUpdate(state, request.User, "已清空当前启用人设。"), nil
@@ -103,12 +119,15 @@ func (p *personaPlugin) OnComponent(ctx context.Context, host *pluginapi.HostCli
 		if len(request.Values) == 0 {
 			return personaPanelUpdate(state, request.User, "请选择一个人设。"), nil
 		}
-		name := strings.TrimSpace(request.Values[0])
+		name := normalizePersonaName(request.Values[0])
 		if _, ok := state.Personas[name]; !ok {
 			return personaPanelUpdate(state, request.User, "人设不存在。"), nil
 		}
-		state.Active = name
-		if err := savePersonaState(ctx, host, state); err != nil {
+		if err := host.PersonaActivate(ctx, state.Scope, name); err != nil {
+			return nil, err
+		}
+		state, err = loadPersonaState(ctx, host, scope)
+		if err != nil {
 			return nil, err
 		}
 		return personaPanelUpdate(state, request.User, fmt.Sprintf("已切换到人设: %s", name)), nil
@@ -119,10 +138,11 @@ func (p *personaPlugin) OnComponent(ctx context.Context, host *pluginapi.HostCli
 
 func (p *personaPlugin) OnModal(ctx context.Context, host *pluginapi.HostClient, request pluginapi.ModalRequest) (*pluginapi.InteractionResponse, error) {
 	if !request.User.IsAdmin {
-		return personaPanelMessage(ctx, host, request.User, "你没有权限执行这个操作。")
+		return personaPanelMessage(ctx, host, scopeFromLocation(request.Guild.ID, request.Channel), request.User, "你没有权限执行这个操作。")
 	}
 
-	state, err := loadPersonaState(ctx, host)
+	scope := scopeFromLocation(request.Guild.ID, request.Channel)
+	state, err := loadPersonaState(ctx, host, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -132,58 +152,48 @@ func (p *personaPlugin) OnModal(ctx context.Context, host *pluginapi.HostClient,
 		name := normalizePersonaName(request.Fields[personaFieldName])
 		prompt := strings.TrimSpace(request.Fields[personaFieldPrompt])
 		if name == "" || prompt == "" {
-			return personaPanelMessage(ctx, host, request.User, "人设名称和 Prompt 都不能为空。")
+			return personaPanelMessage(ctx, host, scope, request.User, "人设名称和 Prompt 都不能为空。")
 		}
-		state.Personas[name] = prompt
-		state.Active = name
-		if err := savePersonaState(ctx, host, state); err != nil {
+		if err := host.PersonaUpsert(ctx, pluginapi.PersonaUpsertRequest{
+			Scope:  scope,
+			Name:   name,
+			Prompt: prompt,
+			Origin: "official_persona",
+		}); err != nil {
 			return nil, err
 		}
-		return personaPanelMessage(ctx, host, request.User, fmt.Sprintf("已保存并切换到人设: %s", name))
+		if err := host.PersonaActivate(ctx, scope, name); err != nil {
+			return nil, err
+		}
+		return personaPanelMessage(ctx, host, scope, request.User, fmt.Sprintf("已保存并切换到人设: %s", name))
 	case personaModalEditActive:
 		active := strings.TrimSpace(state.Active)
 		if active == "" {
-			return personaPanelMessage(ctx, host, request.User, "当前没有启用中的人设，无法编辑。")
+			return personaPanelMessage(ctx, host, scope, request.User, "当前没有启用中的人设，无法编辑。")
 		}
 		prompt := strings.TrimSpace(request.Fields[personaFieldEditPrompt])
 		if prompt == "" {
-			return personaPanelMessage(ctx, host, request.User, "当前人设 Prompt 不能为空。")
+			return personaPanelMessage(ctx, host, scope, request.User, "当前人设 Prompt 不能为空。")
 		}
-		state.Personas[active] = prompt
-		if err := savePersonaState(ctx, host, state); err != nil {
+		if err := host.PersonaUpsert(ctx, pluginapi.PersonaUpsertRequest{
+			Scope:  scope,
+			Name:   active,
+			Prompt: prompt,
+			Origin: "official_persona",
+		}); err != nil {
 			return nil, err
 		}
-		return personaPanelMessage(ctx, host, request.User, fmt.Sprintf("已更新当前人设: %s", active))
+		if err := host.PersonaActivate(ctx, scope, active); err != nil {
+			return nil, err
+		}
+		return personaPanelMessage(ctx, host, scope, request.User, fmt.Sprintf("已更新当前人设: %s", active))
 	default:
-		return personaPanelMessage(ctx, host, request.User, "未知的人设表单。")
+		return personaPanelMessage(ctx, host, scope, request.User, "未知的人设表单。")
 	}
 }
 
-func (p *personaPlugin) OnPromptBuild(ctx context.Context, host *pluginapi.HostClient, request pluginapi.PromptBuildRequest) (*pluginapi.PromptBuildResponse, error) {
-	state, err := loadPersonaState(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	active := strings.TrimSpace(state.Active)
-	if active == "" {
-		return nil, nil
-	}
-	prompt := strings.TrimSpace(state.Personas[active])
-	if prompt == "" {
-		return nil, nil
-	}
-	return &pluginapi.PromptBuildResponse{
-		Blocks: []pluginapi.PromptBlock{
-			{
-				Role:    "system",
-				Content: "当前人设 Prompt:\n" + prompt,
-			},
-		},
-	}, nil
-}
-
-func personaPanelMessage(ctx context.Context, host *pluginapi.HostClient, user pluginapi.UserInfo, notice string) (*pluginapi.InteractionResponse, error) {
-	state, err := loadPersonaState(ctx, host)
+func personaPanelMessage(ctx context.Context, host *pluginapi.HostClient, scope pluginapi.PersonaScope, user pluginapi.UserInfo, notice string) (*pluginapi.InteractionResponse, error) {
+	state, err := loadPersonaState(ctx, host, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -203,10 +213,14 @@ func personaPanelUpdate(state personaState, user pluginapi.UserInfo, notice stri
 func buildPersonaPanel(state personaState, user pluginapi.UserInfo, notice string, ephemeral bool) *pluginapi.InteractionMessage {
 	names := personaNames(state)
 	active := strings.TrimSpace(state.Active)
-	activePrompt := strings.TrimSpace(state.Personas[active])
+	activePrompt := ""
+	if persona, ok := state.Personas[active]; ok {
+		activePrompt = strings.TrimSpace(persona.Prompt)
+	}
 
 	description := []string{
-		"管理当前启用的人设，并把人设 Prompt 注入聊天上下文。",
+		"管理当前作用域的人设。保存后，核心会直接把启用中的人设 Prompt 注入聊天上下文。",
+		"当前作用域: " + scopeLabel(state.Scope),
 	}
 	if !user.IsAdmin {
 		description = append(description, "你当前只有查看权限。")
@@ -249,7 +263,7 @@ func buildPersonaPanel(state personaState, user pluginapi.UserInfo, notice strin
 				Description: strings.Join(description, "\n"),
 				Color:       0x2563EB,
 				Fields:      fields,
-				Footer:      "保存后会自动切换到对应人设。",
+				Footer:      "当前面板只操作当前服务器/频道/子区作用域。",
 			},
 		},
 		Components: buildPersonaComponents(state, user.IsAdmin),
@@ -279,10 +293,11 @@ func buildPersonaComponents(state personaState, isAdmin bool) []pluginapi.Action
 		if index >= personaSelectOptionLimit {
 			break
 		}
+		entry := state.Personas[name]
 		options = append(options, pluginapi.SelectOption{
 			Label:       shared.TruncateRunes(name, 100),
 			Value:       name,
-			Description: shared.TruncateRunes(shared.SingleLine(state.Personas[name]), personaPromptOptionRunes),
+			Description: shared.TruncateRunes(shared.SingleLine(entry.Prompt), personaPromptOptionRunes),
 			Default:     name == state.Active,
 		})
 	}
@@ -303,6 +318,10 @@ func buildPersonaComponents(state personaState, isAdmin bool) []pluginapi.Action
 
 func buildPersonaUpsertModal(state personaState) *pluginapi.ModalResponse {
 	active := strings.TrimSpace(state.Active)
+	activePrompt := ""
+	if persona, ok := state.Personas[active]; ok {
+		activePrompt = strings.TrimSpace(persona.Prompt)
+	}
 	return &pluginapi.ModalResponse{
 		CustomID: personaModalUpsert,
 		Title:    "新增或覆盖人设",
@@ -322,7 +341,7 @@ func buildPersonaUpsertModal(state personaState) *pluginapi.ModalResponse {
 				Label:       "人设 Prompt",
 				Style:       "paragraph",
 				Placeholder: "输入完整人设提示词，保存后会自动切换到这个人设。",
-				Value:       strings.TrimSpace(state.Personas[active]),
+				Value:       activePrompt,
 				Required:    true,
 				MinLength:   1,
 				MaxLength:   4000,
@@ -337,6 +356,10 @@ func buildPersonaEditModal(state personaState) *pluginapi.ModalResponse {
 	if active != "" {
 		title = shared.TruncateRunes("编辑当前人设: "+active, 45)
 	}
+	activePrompt := ""
+	if persona, ok := state.Personas[active]; ok {
+		activePrompt = strings.TrimSpace(persona.Prompt)
+	}
 	return &pluginapi.ModalResponse{
 		CustomID: personaModalEditActive,
 		Title:    title,
@@ -346,7 +369,7 @@ func buildPersonaEditModal(state personaState) *pluginapi.ModalResponse {
 				Label:       "当前人设 Prompt",
 				Style:       "paragraph",
 				Placeholder: "修改当前启用人设的 Prompt 内容",
-				Value:       strings.TrimSpace(state.Personas[active]),
+				Value:       activePrompt,
 				Required:    true,
 				MinLength:   1,
 				MaxLength:   4000,
@@ -355,37 +378,62 @@ func buildPersonaEditModal(state personaState) *pluginapi.ModalResponse {
 	}
 }
 
-func loadPersonaState(ctx context.Context, host *pluginapi.HostClient) (personaState, error) {
-	state := personaState{Personas: map[string]string{}}
-	found, err := host.StorageGet(ctx, personaStorageKey, &state)
+func loadPersonaState(ctx context.Context, host *pluginapi.HostClient, scope pluginapi.PersonaScope) (personaState, error) {
+	response, err := host.PersonaList(ctx, scope)
 	if err != nil {
 		return personaState{}, err
 	}
-	if !found || state.Personas == nil {
-		state.Personas = map[string]string{}
+	state := personaState{
+		Scope:    scope,
+		Personas: map[string]pluginapi.PersonaEntry{},
+		Active:   normalizePersonaName(response.Active),
 	}
-	state.Active = normalizePersonaName(state.Active)
-	normalized := make(map[string]string, len(state.Personas))
-	for name, prompt := range state.Personas {
-		name = normalizePersonaName(name)
-		prompt = strings.TrimSpace(prompt)
+	for _, persona := range response.Personas {
+		name := normalizePersonaName(persona.Name)
+		prompt := strings.TrimSpace(persona.Prompt)
 		if name == "" || prompt == "" {
 			continue
 		}
-		normalized[name] = prompt
+		persona.Name = name
+		persona.Prompt = prompt
+		persona.Origin = strings.TrimSpace(persona.Origin)
+		persona.UpdatedAt = strings.TrimSpace(persona.UpdatedAt)
+		state.Personas[name] = persona
 	}
-	state.Personas = normalized
 	if _, ok := state.Personas[state.Active]; !ok {
 		state.Active = ""
 	}
 	return state, nil
 }
 
-func savePersonaState(ctx context.Context, host *pluginapi.HostClient, state personaState) error {
-	if state.Personas == nil {
-		state.Personas = map[string]string{}
+func migrateLegacyState(ctx context.Context, host *pluginapi.HostClient) error {
+	var legacy legacyPersonaState
+	found, err := host.StorageGet(ctx, personaStorageKey, &legacy)
+	if err != nil || !found {
+		return err
 	}
-	return host.StorageSet(ctx, personaStorageKey, state)
+	globalScope := pluginapi.PersonaScope{Type: pluginapi.PersonaScopeGlobal}
+	for name, prompt := range legacy.Personas {
+		name = normalizePersonaName(name)
+		prompt = strings.TrimSpace(prompt)
+		if name == "" || prompt == "" {
+			continue
+		}
+		if err := host.PersonaUpsert(ctx, pluginapi.PersonaUpsertRequest{
+			Scope:  globalScope,
+			Name:   name,
+			Prompt: prompt,
+			Origin: "official_persona_legacy",
+		}); err != nil {
+			return err
+		}
+	}
+	if active := normalizePersonaName(legacy.Active); active != "" {
+		if err := host.PersonaActivate(ctx, globalScope, active); err != nil {
+			return err
+		}
+	}
+	return host.StorageDelete(ctx, personaStorageKey)
 }
 
 func personaNames(state personaState) []string {
@@ -395,6 +443,47 @@ func personaNames(state personaState) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func scopeFromLocation(guildID string, channel pluginapi.ChannelInfo) pluginapi.PersonaScope {
+	guildID = strings.TrimSpace(guildID)
+	channelID := strings.TrimSpace(channel.ID)
+	threadID := strings.TrimSpace(channel.ThreadID)
+	switch {
+	case threadID != "":
+		return pluginapi.PersonaScope{
+			Type:      pluginapi.PersonaScopeThread,
+			GuildID:   guildID,
+			ChannelID: channelID,
+			ThreadID:  threadID,
+		}
+	case channelID != "":
+		return pluginapi.PersonaScope{
+			Type:      pluginapi.PersonaScopeChannel,
+			GuildID:   guildID,
+			ChannelID: channelID,
+		}
+	case guildID != "":
+		return pluginapi.PersonaScope{
+			Type:    pluginapi.PersonaScopeGuild,
+			GuildID: guildID,
+		}
+	default:
+		return pluginapi.PersonaScope{Type: pluginapi.PersonaScopeGlobal}
+	}
+}
+
+func scopeLabel(scope pluginapi.PersonaScope) string {
+	switch strings.TrimSpace(scope.Type) {
+	case pluginapi.PersonaScopeThread:
+		return fmt.Sprintf("子区 `%s` / 频道 `%s` / 服务器 `%s`", strings.TrimSpace(scope.ThreadID), strings.TrimSpace(scope.ChannelID), strings.TrimSpace(scope.GuildID))
+	case pluginapi.PersonaScopeChannel:
+		return fmt.Sprintf("频道 `%s` / 服务器 `%s`", strings.TrimSpace(scope.ChannelID), strings.TrimSpace(scope.GuildID))
+	case pluginapi.PersonaScopeGuild:
+		return fmt.Sprintf("服务器 `%s`", strings.TrimSpace(scope.GuildID))
+	default:
+		return "全局"
+	}
 }
 
 func normalizePersonaName(value string) string {

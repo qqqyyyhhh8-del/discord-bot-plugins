@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Self Learning Console</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app-shell" data-sidebar-open="false">
+    <button class="nav-toggle" id="nav-toggle" type="button" aria-label="打开导航">
+      <span></span>
+      <span></span>
+      <span></span>
+    </button>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="brand-block">
+        <p class="eyebrow">Official Plugin</p>
+        <h1>Self Learning Console</h1>
+        <p class="brand-copy">查看学习状态、人格同步和社交图谱，一站式管理当前插件。</p>
+      </div>
+
+      <section class="sidebar-panel">
+        <label class="field-label" for="scope-select">作用域</label>
+        <select id="scope-select" class="scope-select"></select>
+        <p class="scope-caption" id="scope-caption">尚未加载作用域。</p>
+      </section>
+
+      <nav class="nav-list" id="nav-list">
+        <button class="nav-item is-active" type="button" data-view="overview">总览</button>
+        <button class="nav-item" type="button" data-view="learning">学习</button>
+        <button class="nav-item" type="button" data-view="persona">人格</button>
+        <button class="nav-item" type="button" data-view="graph">图谱</button>
+        <button class="nav-item" type="button" data-view="settings">配置</button>
+      </nav>
+
+      <section class="sidebar-panel sidebar-foot">
+        <div class="status-line">
+          <span class="status-dot" id="web-status-dot"></span>
+          <span id="web-status-text">Web 服务未连接</span>
+        </div>
+        <p class="tiny-copy" id="web-access-text">等待加载。</p>
+      </section>
+    </aside>
+
+    <div class="sidebar-mask" id="sidebar-mask"></div>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="topbar-tag">Memory Runtime</p>
+          <h2 id="view-title">总览</h2>
+        </div>
+        <div class="topbar-actions">
+          <button class="ghost-button" id="refresh-button" type="button">刷新</button>
+          <button class="primary-button" id="learn-button" type="button">强制学习</button>
+        </div>
+      </header>
+
+      <section class="auth-card hidden" id="auth-card">
+        <div class="auth-copy">
+          <p class="eyebrow">Access</p>
+          <h3>输入访问令牌</h3>
+          <p>首次访问可以直接打开机器人面板里给出的完整链接，或在这里手动输入令牌。</p>
+        </div>
+        <form id="auth-form" class="auth-form">
+          <input id="token-input" name="token" type="password" autocomplete="off" placeholder="Web Access Token">
+          <button class="primary-button" type="submit">进入控制台</button>
+        </form>
+        <p class="tiny-copy" id="auth-error"></p>
+      </section>
+
+      <section class="empty-state hidden" id="empty-state">
+        <p class="eyebrow">No Scope</p>
+        <h3>还没有可展示的学习作用域</h3>
+        <p>先在 Discord 中启用某个服务器、频道或子区的自学习，然后这里就会出现数据。</p>
+      </section>
+
+      <div class="views hidden" id="views">
+        <section class="view is-active" data-view-panel="overview">
+          <div class="hero-strip">
+            <div class="hero-copy">
+              <p class="eyebrow">Current Scope</p>
+              <h3 id="scope-title">-</h3>
+              <p id="scope-description">等待加载当前作用域。</p>
+            </div>
+            <div class="hero-meta">
+              <div class="meta-line">
+                <span>最后学习</span>
+                <strong id="metric-last-learned">-</strong>
+              </div>
+              <div class="meta-line">
+                <span>Web 入口</span>
+                <strong id="metric-web-url">-</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="metric-grid" id="metric-grid"></div>
+
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Highlights</p>
+                <h3>最近学习重点</h3>
+              </div>
+              <div class="bullet-list" id="highlights-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Affinity</p>
+                <h3>当前好感度</h3>
+              </div>
+              <div class="rank-list" id="affinity-list"></div>
+            </article>
+          </div>
+
+          <article class="panel">
+            <div class="panel-head">
+              <p class="eyebrow">Recent Feed</p>
+              <h3>最近互动轨迹</h3>
+            </div>
+            <div class="timeline" id="recent-feed"></div>
+          </article>
+        </section>
+
+        <section class="view" data-view-panel="learning">
+          <div class="summary-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Scene</p>
+                <h3>当前场景摘要</h3>
+              </div>
+              <div class="prose-block" id="summary-scene"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Long Memory</p>
+                <h3>长期摘要</h3>
+              </div>
+              <div class="prose-block" id="summary-summary"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Style</p>
+                <h3>表达风格</h3>
+              </div>
+              <div class="prose-block" id="summary-style"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Slang</p>
+                <h3>黑话与语境</h3>
+              </div>
+              <div class="prose-block" id="summary-slang"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Intent</p>
+                <h3>对话意图</h3>
+              </div>
+              <div class="prose-block" id="summary-intent"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Mood</p>
+                <h3>情绪状态</h3>
+              </div>
+              <div class="prose-block" id="summary-mood"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Relation</p>
+                <h3>关系综述</h3>
+              </div>
+              <div class="prose-block" id="summary-relationship"></div>
+            </article>
+          </div>
+
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Episodes</p>
+                <h3>历史片段</h3>
+              </div>
+              <div class="bullet-list" id="episodes-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Cards</p>
+                <h3>结构化记忆卡片</h3>
+              </div>
+              <div class="bullet-list" id="cards-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view-panel="persona">
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Runtime Persona</p>
+                <h3>当前启用人格</h3>
+              </div>
+              <div class="stack-block">
+                <div class="pill-row">
+                  <span class="status-pill" id="persona-active-name">未启用</span>
+                  <span class="ghost-pill" id="persona-active-origin">-</span>
+                </div>
+                <div class="prose-block tall" id="persona-active-prompt"></div>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Auto Persona</p>
+                <h3>自动生成人格 Prompt</h3>
+              </div>
+              <div class="prose-block tall" id="persona-auto-prompt"></div>
+            </article>
+          </div>
+
+          <article class="panel">
+            <div class="panel-head">
+              <p class="eyebrow">Saved Personas</p>
+              <h3>当前作用域已保存人格</h3>
+            </div>
+            <div class="persona-list" id="persona-saved-list"></div>
+          </article>
+        </section>
+
+        <section class="view" data-view-panel="graph">
+          <div class="graph-toolbar">
+            <div class="graph-controls">
+              <label class="field-label" for="graph-type-filter">关系筛选</label>
+              <select id="graph-type-filter" class="scope-select"></select>
+            </div>
+            <div class="graph-controls">
+              <label class="field-label" for="graph-focus-filter">成员聚焦</label>
+              <select id="graph-focus-filter" class="scope-select"></select>
+            </div>
+          </div>
+
+          <div class="graph-layout">
+            <article class="panel graph-stage">
+              <div class="panel-head">
+                <p class="eyebrow">Network</p>
+                <h3>社交关系图谱</h3>
+              </div>
+              <div class="graph-canvas-wrap">
+                <svg id="graph-canvas" viewBox="0 0 960 560" preserveAspectRatio="xMidYMid meet"></svg>
+                <div class="graph-empty hidden" id="graph-empty">当前还没有可视化关系数据。</div>
+              </div>
+              <div class="legend-row" id="graph-legend"></div>
+            </article>
+
+            <article class="panel graph-side">
+              <div class="panel-head">
+                <p class="eyebrow">Details</p>
+                <h3>节点详情</h3>
+              </div>
+              <div class="graph-detail" id="graph-detail">点击图中的成员节点后，这里会显示最近活跃度、好感度和关联关系。</div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view-panel="settings">
+          <div class="two-column">
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Learning Config</p>
+                <h3>学习配置</h3>
+              </div>
+              <form id="config-form" class="config-form">
+                <label class="toggle-row">
+                  <span>启用当前作用域自学习</span>
+                  <input id="config-enabled" type="checkbox">
+                </label>
+
+                <label class="field-stack">
+                  <span class="field-label">批处理大小</span>
+                  <input id="config-batch-size" type="number" min="1" max="120">
+                </label>
+
+                <label class="field-stack">
+                  <span class="field-label">目标用户 ID</span>
+                  <textarea id="config-target-ids" rows="8" placeholder="每行一个用户 ID，留空表示仅学习社区整体氛围。"></textarea>
+                </label>
+
+                <div class="button-row">
+                  <button class="primary-button" type="submit">保存配置</button>
+                </div>
+              </form>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head">
+                <p class="eyebrow">Web Runtime</p>
+                <h3>控制台访问</h3>
+              </div>
+              <div class="stack-block">
+                <div class="prose-block" id="settings-web-info"></div>
+                <div class="note-block" id="settings-budget-info"></div>
+                <div class="button-row">
+                  <button class="ghost-button" id="copy-access-url" type="button">复制完整入口</button>
+                  <button class="ghost-button" id="rotate-token" type="button">重置令牌</button>
+                </div>
+                <div class="note-block" id="settings-web-hints"></div>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
