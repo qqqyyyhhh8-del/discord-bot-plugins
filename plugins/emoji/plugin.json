@@ -1,0 +1,28 @@
+{
+  "id": "official_emoji",
+  "name": "Official Emoji Plugin",
+  "version": "v0.1.0",
+  "description": "Official guild emoji analysis plugin with worldbook updates.",
+  "min_host_version": "v0.5.0",
+  "runtime": {
+    "command": "go",
+    "args": ["run", "./cmd/emoji-plugin"]
+  },
+  "capabilities": [
+    "plugin.storage",
+    "discord.interaction.respond",
+    "discord.read_guild_emojis",
+    "llm.chat",
+    "worldbook.read",
+    "worldbook.write"
+  ],
+  "commands": [
+    {
+      "name": "emoji",
+      "description": "Open the guild emoji analysis panel."
+    }
+  ],
+  "component_prefixes": [
+    "emoji:"
+  ]
+}

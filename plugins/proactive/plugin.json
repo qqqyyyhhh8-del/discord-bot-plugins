@@ -1,0 +1,25 @@
+{
+  "id": "official_proactive",
+  "name": "Official Proactive Plugin",
+  "version": "v0.1.0",
+  "description": "Official proactive reply plugin with probability control panel.",
+  "min_host_version": "v0.5.0",
+  "runtime": {
+    "command": "go",
+    "args": ["run", "./cmd/proactive-plugin"]
+  },
+  "capabilities": [
+    "plugin.storage",
+    "discord.interaction.respond",
+    "discord.reply_with_core"
+  ],
+  "commands": [
+    {
+      "name": "proactive",
+      "description": "Open the proactive reply control panel."
+    }
+  ],
+  "component_prefixes": [
+    "proactive:"
+  ]
+}

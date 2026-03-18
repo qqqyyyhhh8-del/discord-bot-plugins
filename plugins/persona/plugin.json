@@ -1,0 +1,24 @@
+{
+  "id": "official_persona",
+  "name": "Official Persona Plugin",
+  "version": "v0.1.0",
+  "description": "Official persona management plugin with prompt injection.",
+  "min_host_version": "v0.5.0",
+  "runtime": {
+    "command": "go",
+    "args": ["run", "./cmd/persona-plugin"]
+  },
+  "capabilities": [
+    "plugin.storage",
+    "discord.interaction.respond"
+  ],
+  "commands": [
+    {
+      "name": "persona",
+      "description": "Open the persona management panel."
+    }
+  ],
+  "component_prefixes": [
+    "persona:"
+  ]
+}
