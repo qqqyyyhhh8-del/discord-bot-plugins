@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"discord-bot-plugins/internal/shared"
@@ -127,9 +128,13 @@ type selfLearningPlugin struct {
 	pluginapi.BasePlugin
 	web    *memoryWebRuntime
 	webErr string
+
+	learnMu  sync.Mutex
+	learning map[string]time.Time
 }
 
 func (p *selfLearningPlugin) Initialize(ctx context.Context, host *pluginapi.HostClient, request pluginapi.InitializeRequest) error {
+	p.ensureLearningState()
 	settings, err := ensureWebSettings(ctx, host)
 	if err != nil {
 		p.webErr = err.Error()
@@ -173,7 +178,8 @@ func (p *selfLearningPlugin) currentWebStatus() memoryWebStatus {
 }
 
 func (p *selfLearningPlugin) OnSlashCommand(ctx context.Context, host *pluginapi.HostClient, request pluginapi.SlashCommandRequest) (*pluginapi.InteractionResponse, error) {
-	return memoryPanelMessage(ctx, host, scopeFromLocation(request.Guild.ID, request.Channel), request.User, p.currentWebStatus(), "")
+	scope := scopeFromLocation(request.Guild.ID, request.Channel)
+	return memoryPanelMessage(ctx, host, scope, request.User, p.currentWebStatus(), "", p.isLearning(scope))
 }
 
 func (p *selfLearningPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClient, request pluginapi.ComponentRequest) (*pluginapi.InteractionResponse, error) {
@@ -185,10 +191,10 @@ func (p *selfLearningPlugin) OnComponent(ctx context.Context, host *pluginapi.Ho
 
 	switch strings.TrimSpace(request.CustomID) {
 	case memoryActionRefresh:
-		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已刷新自学习面板。"), nil
+		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已刷新自学习面板。", p.isLearning(scope)), nil
 	case memoryActionToggle:
 		if !request.User.IsAdmin {
-			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。"), nil
+			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。", p.isLearning(scope)), nil
 		}
 		state.Config.Enabled = !state.Config.Enabled
 		if err := saveConfig(ctx, host, scope, state.Config); err != nil {
@@ -199,12 +205,17 @@ func (p *selfLearningPlugin) OnComponent(ctx context.Context, host *pluginapi.Ho
 			return nil, err
 		}
 		if state.Config.Enabled {
-			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已启用当前作用域的自学习。"), nil
+			started := p.startLearningJob(host, scope, false)
+			notice := "已启用当前作用域的自学习。"
+			if started {
+				notice = "已启用当前作用域的自学习，并开始后台学习。"
+			}
+			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), notice, p.isLearning(scope)), nil
 		}
-		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已停用当前作用域的自学习。"), nil
+		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已停用当前作用域的自学习。当前正在运行的学习任务会自然结束。", p.isLearning(scope)), nil
 	case memoryActionEditTargets:
 		if !request.User.IsAdmin {
-			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。"), nil
+			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。", p.isLearning(scope)), nil
 		}
 		return &pluginapi.InteractionResponse{
 			Type:  pluginapi.InteractionResponseTypeModal,
@@ -212,7 +223,7 @@ func (p *selfLearningPlugin) OnComponent(ctx context.Context, host *pluginapi.Ho
 		}, nil
 	case memoryActionClearTargets:
 		if !request.User.IsAdmin {
-			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。"), nil
+			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。", p.isLearning(scope)), nil
 		}
 		state.Config.TargetUserIDs = nil
 		if err := saveConfig(ctx, host, scope, state.Config); err != nil {
@@ -222,26 +233,21 @@ func (p *selfLearningPlugin) OnComponent(ctx context.Context, host *pluginapi.Ho
 		if err != nil {
 			return nil, err
 		}
-		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已清空目标用户。"), nil
+		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已清空目标用户。", p.isLearning(scope)), nil
 	case memoryActionForceLearn:
 		if !request.User.IsAdmin {
-			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。"), nil
+			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。", p.isLearning(scope)), nil
 		}
-		updated, changed, err := learnScope(ctx, host, scope, true)
-		if err != nil {
-			return memoryPanelMessage(ctx, host, scope, request.User, p.currentWebStatus(), "强制学习失败: "+err.Error())
+		if !state.Config.Enabled {
+			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "当前作用域尚未启用学习。", p.isLearning(scope)), nil
 		}
-		if !changed {
-			return memoryPanelMessage(ctx, host, scope, request.User, p.currentWebStatus(), "当前没有可学习的新消息。")
+		if p.startLearningJob(host, scope, true) {
+			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已开始后台强制学习，请稍后点击刷新查看结果。", p.isLearning(scope)), nil
 		}
-		state, err = loadPanelState(ctx, host, scope)
-		if err != nil {
-			return nil, err
-		}
-		return memoryPanelUpdate(withProfile(state, updated), request.User, p.currentWebStatus(), "已完成一次强制学习。"), nil
+		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "当前已经有学习任务在运行，请稍后刷新。", p.isLearning(scope)), nil
 	case memoryActionRotateWebToken:
 		if !request.User.IsAdmin {
-			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。"), nil
+			return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "你没有权限执行这个操作。", p.isLearning(scope)), nil
 		}
 		settings, err := loadWebSettings(ctx, host)
 		if err != nil {
@@ -257,16 +263,16 @@ func (p *selfLearningPlugin) OnComponent(ctx context.Context, host *pluginapi.Ho
 		if p.web != nil {
 			p.web.UpdateToken(settings.AccessToken)
 		}
-		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已重新生成 Web 控制台访问令牌。"), nil
+		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "已重新生成 Web 控制台访问令牌。", p.isLearning(scope)), nil
 	default:
-		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "未知的自学习面板操作。"), nil
+		return memoryPanelUpdate(state, request.User, p.currentWebStatus(), "未知的自学习面板操作。", p.isLearning(scope)), nil
 	}
 }
 
 func (p *selfLearningPlugin) OnModal(ctx context.Context, host *pluginapi.HostClient, request pluginapi.ModalRequest) (*pluginapi.InteractionResponse, error) {
 	scope := scopeFromLocation(request.Guild.ID, request.Channel)
 	if !request.User.IsAdmin {
-		return memoryPanelMessage(ctx, host, scope, request.User, p.currentWebStatus(), "你没有权限执行这个操作。")
+		return memoryPanelMessage(ctx, host, scope, request.User, p.currentWebStatus(), "你没有权限执行这个操作。", p.isLearning(scope))
 	}
 
 	switch strings.TrimSpace(request.CustomID) {
@@ -280,9 +286,13 @@ func (p *selfLearningPlugin) OnModal(ctx context.Context, host *pluginapi.HostCl
 		if err := saveConfig(ctx, host, scope, config); err != nil {
 			return nil, err
 		}
-		return memoryPanelMessage(ctx, host, scope, request.User, p.currentWebStatus(), "已更新目标用户，并自动启用当前作用域自学习。")
+		notice := "已更新目标用户，并自动启用当前作用域自学习。"
+		if p.startLearningJob(host, scope, false) {
+			notice = "已更新目标用户，并自动启用当前作用域自学习。后台学习已开始。"
+		}
+		return memoryPanelMessage(ctx, host, scope, request.User, p.currentWebStatus(), notice, p.isLearning(scope))
 	default:
-		return memoryPanelMessage(ctx, host, scope, request.User, p.currentWebStatus(), "未知的自学习表单。")
+		return memoryPanelMessage(ctx, host, scope, request.User, p.currentWebStatus(), "未知的自学习表单。", p.isLearning(scope))
 	}
 }
 
@@ -346,10 +356,14 @@ func (p *selfLearningPlugin) OnReplyCommitted(ctx context.Context, host *plugina
 	if err := appendRecentEvent(ctx, host, scope, event); err != nil {
 		return err
 	}
-	return appendRecentMessage(ctx, host, scope, pluginapi.PromptConversationMessage{
+	if err := appendRecentMessage(ctx, host, scope, pluginapi.PromptConversationMessage{
 		Role:    "assistant",
 		Content: renderEventForPrompt(event),
-	})
+	}); err != nil {
+		return err
+	}
+	p.startLearningJob(host, scope, false)
+	return nil
 }
 
 func (p *selfLearningPlugin) OnContextBuild(ctx context.Context, host *pluginapi.HostClient, request pluginapi.ContextBuildRequest) (*pluginapi.ContextBuildResponse, error) {
@@ -379,28 +393,29 @@ func (p *selfLearningPlugin) OnInterval(ctx context.Context, host *pluginapi.Hos
 	return nil
 }
 
-func memoryPanelMessage(ctx context.Context, host *pluginapi.HostClient, scope pluginapi.PersonaScope, user pluginapi.UserInfo, web memoryWebStatus, notice string) (*pluginapi.InteractionResponse, error) {
+func memoryPanelMessage(ctx context.Context, host *pluginapi.HostClient, scope pluginapi.PersonaScope, user pluginapi.UserInfo, web memoryWebStatus, notice string, learningActive bool) (*pluginapi.InteractionResponse, error) {
 	state, err := loadPanelState(ctx, host, scope)
 	if err != nil {
 		return nil, err
 	}
 	return &pluginapi.InteractionResponse{
 		Type:    pluginapi.InteractionResponseTypeMessage,
-		Message: buildMemoryPanel(state, user, web, notice, true),
+		Message: buildMemoryPanel(state, user, web, notice, true, learningActive),
 	}, nil
 }
 
-func memoryPanelUpdate(state panelState, user pluginapi.UserInfo, web memoryWebStatus, notice string) *pluginapi.InteractionResponse {
+func memoryPanelUpdate(state panelState, user pluginapi.UserInfo, web memoryWebStatus, notice string, learningActive bool) *pluginapi.InteractionResponse {
 	return &pluginapi.InteractionResponse{
 		Type:    pluginapi.InteractionResponseTypeUpdate,
-		Message: buildMemoryPanel(state, user, web, notice, false),
+		Message: buildMemoryPanel(state, user, web, notice, false, learningActive),
 	}
 }
 
-func buildMemoryPanel(state panelState, user pluginapi.UserInfo, web memoryWebStatus, notice string, ephemeral bool) *pluginapi.InteractionMessage {
+func buildMemoryPanel(state panelState, user pluginapi.UserInfo, web memoryWebStatus, notice string, ephemeral bool, learningActive bool) *pluginapi.InteractionMessage {
 	description := []string{
 		"接管当前作用域的上下文、记忆和自动人格演化。",
 		"作用域: " + scopeLabel(state.Scope),
+		"启用后会持续记录消息；后台学习会在强制学习、启用后以及每次回复提交后触发。",
 	}
 	if strings.TrimSpace(notice) != "" {
 		description = append(description, "提示: "+strings.TrimSpace(notice))
@@ -436,6 +451,11 @@ func buildMemoryPanel(state panelState, user pluginapi.UserInfo, web memoryWebSt
 			Inline: true,
 		},
 		{
+			Name:   "学习任务",
+			Value:  learningStatusLabel(learningActive),
+			Inline: true,
+		},
+		{
 			Name:   "Episodes / Cards",
 			Value:  fmt.Sprintf("%d / %d", state.Profile.EpisodeCount, state.Profile.CardCount),
 			Inline: true,
@@ -453,6 +473,11 @@ func buildMemoryPanel(state panelState, user pluginapi.UserInfo, web memoryWebSt
 		{
 			Name:   "学习摘要",
 			Value:  previewBlock(joinNonEmpty("\n\n", state.Profile.Summary, state.Profile.StyleSummary, state.Profile.SlangSummary), "当前还没有学习摘要。"),
+			Inline: false,
+		},
+		{
+			Name:   "最近错误",
+			Value:  previewBlock(state.Profile.LastError, "当前没有记录错误。"),
 			Inline: false,
 		},
 		{
@@ -522,13 +547,77 @@ func buildTargetsModal(state panelState) *pluginapi.ModalResponse {
 				CustomID:    memoryFieldTargets,
 				Label:       "用户 ID 或提及",
 				Style:       "paragraph",
-				Placeholder: "每行一个用户 ID 或 <@123> 提及，留空表示只学习社区整体关系与黑话。",
+				Placeholder: "每行一个用户 ID 或 <@123> 提及。要清空请直接点面板上的“清空目标”。",
 				Value:       strings.Join(state.Config.TargetUserIDs, "\n"),
-				Required:    false,
+				Required:    true,
+				MinLength:   1,
 				MaxLength:   2000,
 			},
 		},
 	}
+}
+
+func (p *selfLearningPlugin) ensureLearningState() {
+	p.learnMu.Lock()
+	defer p.learnMu.Unlock()
+	if p.learning == nil {
+		p.learning = map[string]time.Time{}
+	}
+}
+
+func (p *selfLearningPlugin) isLearning(scope pluginapi.PersonaScope) bool {
+	p.learnMu.Lock()
+	defer p.learnMu.Unlock()
+	if p.learning == nil {
+		return false
+	}
+	_, ok := p.learning[scopeKey(scope)]
+	return ok
+}
+
+func (p *selfLearningPlugin) startLearningJob(host *pluginapi.HostClient, scope pluginapi.PersonaScope, force bool) bool {
+	if p == nil || host == nil {
+		return false
+	}
+	key := scopeKey(scope)
+
+	p.learnMu.Lock()
+	if p.learning == nil {
+		p.learning = map[string]time.Time{}
+	}
+	if _, exists := p.learning[key]; exists {
+		p.learnMu.Unlock()
+		return false
+	}
+	p.learning[key] = time.Now()
+	p.learnMu.Unlock()
+
+	go func() {
+		defer p.finishLearningJob(key)
+
+		jobCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		profile, changed, err := learnScope(jobCtx, host, scope, force)
+		switch {
+		case err != nil:
+			_ = host.Log(jobCtx, "WARN", fmt.Sprintf("self-learning job failed for %s: %v", key, err))
+		case !changed:
+			_ = host.Log(jobCtx, "INFO", fmt.Sprintf("self-learning job skipped for %s: no new events", key))
+		default:
+			_ = host.Log(jobCtx, "INFO", fmt.Sprintf("self-learning job finished for %s: episodes=%d cards=%d", key, profile.EpisodeCount, profile.CardCount))
+		}
+	}()
+	return true
+}
+
+func (p *selfLearningPlugin) finishLearningJob(key string) {
+	p.learnMu.Lock()
+	defer p.learnMu.Unlock()
+	if p.learning == nil {
+		return
+	}
+	delete(p.learning, key)
 }
 
 func learnScope(ctx context.Context, host *pluginapi.HostClient, scope pluginapi.PersonaScope, force bool) (learningProfile, bool, error) {
@@ -1168,6 +1257,13 @@ func boolLabel(value bool) string {
 		return "已启用"
 	}
 	return "未启用"
+}
+
+func learningStatusLabel(active bool) string {
+	if active {
+		return "后台学习中"
+	}
+	return "空闲"
 }
 
 func joinNonEmpty(sep string, values ...string) string {
