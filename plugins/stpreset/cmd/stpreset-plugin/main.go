@@ -21,7 +21,7 @@ const (
 
 	stPresetActionEnable            = "stpreset:enable"
 	stPresetActionDisable           = "stpreset:disable"
-	stPresetActionImportHelp        = "stpreset:import-help"
+	stPresetActionEditCharName      = "stpreset:edit-char-name"
 	stPresetActionEditContent       = "stpreset:edit-content"
 	stPresetActionClear             = "stpreset:clear"
 	stPresetActionRefresh           = "stpreset:refresh"
@@ -38,6 +38,7 @@ const (
 	stPresetActionRegexImport       = "stpreset:regex-import"
 	stPresetActionRegexDelete       = "stpreset:regex-delete"
 
+	stPresetModalCharName      = "stpreset:modal-char-name"
 	stPresetModalContent       = "stpreset:modal-content"
 	stPresetModalPromptMeta    = "stpreset:modal-prompt-meta"
 	stPresetModalPromptContent = "stpreset:modal-prompt-content"
@@ -195,8 +196,11 @@ func (p *presetPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClie
 			return nil, err
 		}
 		return p.panelUpdate(ctx, host, scope, request.User, state, "已关闭当前作用域的酒馆预设。")
-	case stPresetActionImportHelp:
-		return p.panelUpdate(ctx, host, scope, request.User, state, "请重新执行 `/preset`，并在 `preset_file` 选项里上传 SillyTavern 预设 JSON 文件。")
+	case stPresetActionEditCharName:
+		return &pluginapi.InteractionResponse{
+			Type:  pluginapi.InteractionResponseTypeModal,
+			Modal: buildCharNameModal(state),
+		}, nil
 	case stPresetActionEditContent:
 		return &pluginapi.InteractionResponse{
 			Type:  pluginapi.InteractionResponseTypeModal,
@@ -406,8 +410,14 @@ func (p *presetPlugin) OnModal(ctx context.Context, host *pluginapi.HostClient, 
 	}
 
 	switch strings.TrimSpace(request.CustomID) {
-	case stPresetModalContent:
+	case stPresetModalCharName:
 		state.CharName = strings.TrimSpace(request.Fields[stPresetFieldCharName])
+		state.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := savePresetState(ctx, host, scope, state); err != nil {
+			return nil, err
+		}
+		return p.panelMessage(ctx, host, scope, request.User, state, "已更新角色名。")
+	case stPresetModalContent:
 		state.CharDescription = strings.TrimSpace(request.Fields[stPresetFieldCharDescription])
 		state.CharPersonality = strings.TrimSpace(request.Fields[stPresetFieldCharPersonality])
 		state.Scenario = strings.TrimSpace(request.Fields[stPresetFieldScenario])
@@ -756,7 +766,7 @@ func (p *presetPlugin) buildPanel(ctx context.Context, host *pluginapi.HostClien
 				Buttons: []pluginapi.Button{
 					{CustomID: stPresetActionEnable, Label: "启用", Style: "success", Disabled: !user.IsAdmin || state.Enabled || !state.hasPresetSource()},
 					{CustomID: stPresetActionDisable, Label: "停用", Style: "danger", Disabled: !user.IsAdmin || !state.Enabled},
-					{CustomID: stPresetActionImportHelp, Label: "导入说明", Style: "secondary", Disabled: false},
+					{CustomID: stPresetActionEditCharName, Label: "编辑角色名", Style: "secondary", Disabled: !user.IsAdmin},
 					{CustomID: stPresetActionEditContent, Label: "编辑内容", Style: "primary", Disabled: !user.IsAdmin},
 					{CustomID: stPresetActionClear, Label: "清空", Style: "danger", Disabled: !user.IsAdmin},
 				},
@@ -793,10 +803,10 @@ func (p *presetPlugin) buildPanel(ctx context.Context, host *pluginapi.HostClien
 	}, nil
 }
 
-func buildPresetContentModal(state presetState) *pluginapi.ModalResponse {
+func buildCharNameModal(state presetState) *pluginapi.ModalResponse {
 	return &pluginapi.ModalResponse{
-		CustomID: stPresetModalContent,
-		Title:    "编辑预设内容",
+		CustomID: stPresetModalCharName,
+		Title:    "编辑角色名",
 		Fields: []pluginapi.ModalField{
 			{
 				CustomID:    stPresetFieldCharName,
@@ -806,6 +816,15 @@ func buildPresetContentModal(state presetState) *pluginapi.ModalResponse {
 				Value:       limitFieldValue(state.CharName),
 				MaxLength:   256,
 			},
+		},
+	}
+}
+
+func buildPresetContentModal(state presetState) *pluginapi.ModalResponse {
+	return &pluginapi.ModalResponse{
+		CustomID: stPresetModalContent,
+		Title:    "编辑预设内容",
+		Fields: []pluginapi.ModalField{
 			{
 				CustomID:    stPresetFieldCharDescription,
 				Label:       "角色描述 charDescription",
@@ -1174,6 +1193,7 @@ func presetActionRequiresAdmin(action string) bool {
 	switch strings.TrimSpace(action) {
 	case stPresetActionEnable,
 		stPresetActionDisable,
+		stPresetActionEditCharName,
 		stPresetActionEditContent,
 		stPresetActionClear,
 		stPresetActionPromptToggle,

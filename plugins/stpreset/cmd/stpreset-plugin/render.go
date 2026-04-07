@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"regexp"
@@ -300,15 +299,78 @@ func extractRegexTags(input string) (string, []regexDefinition, error) {
 }
 
 func parseRegexDefinition(body string) (string, string, error) {
-	payload := "{" + strings.TrimSpace(body) + "}"
-	parsed := map[string]string{}
-	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "", "", fmt.Errorf("empty regex definition")
+	}
+
+	patternSpec, rest, err := parseRelaxedQuotedString(body)
+	if err != nil {
 		return "", "", err
 	}
-	for key, value := range parsed {
-		return key, value, nil
+	rest = strings.TrimSpace(rest)
+	if !strings.HasPrefix(rest, ":") {
+		return "", "", fmt.Errorf("invalid regex definition: missing separator")
 	}
-	return "", "", fmt.Errorf("empty regex definition")
+
+	replacement, trailing, err := parseRelaxedQuotedString(strings.TrimSpace(rest[1:]))
+	if err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(trailing) != "" {
+		return "", "", fmt.Errorf("invalid regex definition: unexpected trailing content")
+	}
+	return patternSpec, replacement, nil
+}
+
+func parseRelaxedQuotedString(input string) (string, string, error) {
+	input = strings.TrimSpace(input)
+	if !strings.HasPrefix(input, `"`) {
+		return "", "", fmt.Errorf("invalid quoted string")
+	}
+
+	var builder strings.Builder
+	for index := 1; index < len(input); index++ {
+		switch input[index] {
+		case '"':
+			return builder.String(), input[index+1:], nil
+		case '\\':
+			if index+1 >= len(input) {
+				return "", "", fmt.Errorf("unterminated escape sequence")
+			}
+			index++
+			switch input[index] {
+			case '"', '\\', '/':
+				builder.WriteByte(input[index])
+			case 'b':
+				builder.WriteByte('\b')
+			case 'f':
+				builder.WriteByte('\f')
+			case 'n':
+				builder.WriteByte('\n')
+			case 'r':
+				builder.WriteByte('\r')
+			case 't':
+				builder.WriteByte('\t')
+			case 'u':
+				if index+4 >= len(input) {
+					return "", "", fmt.Errorf("invalid unicode escape")
+				}
+				value, err := strconv.ParseInt(input[index+1:index+5], 16, 32)
+				if err != nil {
+					return "", "", fmt.Errorf("invalid unicode escape: %w", err)
+				}
+				builder.WriteRune(rune(value))
+				index += 4
+			default:
+				builder.WriteByte('\\')
+				builder.WriteByte(input[index])
+			}
+		default:
+			builder.WriteByte(input[index])
+		}
+	}
+	return "", "", fmt.Errorf("unterminated quoted string")
 }
 
 func compilePresetRegex(spec string) (*regexp.Regexp, error) {

@@ -98,6 +98,41 @@ func TestExtractRegexTagsParsesAndApplies(t *testing.T) {
 	}
 }
 
+func TestParseRegexDefinitionSupportsPresetEscapes(t *testing.T) {
+	pattern, replacement, err := parseRegexDefinition(`"/User: <additional_settings>\[Start Interaction\]/gs":"User: [Start Interaction]<additional_settings>"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pattern != `/User: <additional_settings>\[Start Interaction\]/gs` {
+		t.Fatalf("unexpected pattern: %q", pattern)
+	}
+	if replacement != `User: [Start Interaction]<additional_settings>` {
+		t.Fatalf("unexpected replacement: %q", replacement)
+	}
+}
+
+func TestExtractRegexTagsSupportsSillyTavernPresetEscapes(t *testing.T) {
+	rendered, regexes, err := extractRegexTags(`<regex order=3>"/<additional_settings>\s*<\/additional_settings>/gs":""</regex><additional_settings></additional_settings>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(rendered) != "<additional_settings></additional_settings>" {
+		t.Fatalf("unexpected stripped content: %q", rendered)
+	}
+	if len(regexes) != 1 {
+		t.Fatalf("expected 1 regex, got %d", len(regexes))
+	}
+
+	compiled, err := compilePresetRegex(regexes[0].PatternSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := compiled.ReplaceAllString(strings.TrimSpace(rendered), regexes[0].Replacement)
+	if applied != "" {
+		t.Fatalf("unexpected regex result: %q", applied)
+	}
+}
+
 func TestBuildPresetEditorViewAppliesPromptOverridesAndCustomRegex(t *testing.T) {
 	enabled := true
 	state := presetState{
