@@ -21,7 +21,7 @@ const (
 
 	stPresetActionEnable            = "stpreset:enable"
 	stPresetActionDisable           = "stpreset:disable"
-	stPresetActionEditFile          = "stpreset:edit-file"
+	stPresetActionImportHelp        = "stpreset:import-help"
 	stPresetActionEditContent       = "stpreset:edit-content"
 	stPresetActionClear             = "stpreset:clear"
 	stPresetActionRefresh           = "stpreset:refresh"
@@ -38,14 +38,12 @@ const (
 	stPresetActionRegexImport       = "stpreset:regex-import"
 	stPresetActionRegexDelete       = "stpreset:regex-delete"
 
-	stPresetModalFile          = "stpreset:modal-file"
 	stPresetModalContent       = "stpreset:modal-content"
 	stPresetModalPromptMeta    = "stpreset:modal-prompt-meta"
 	stPresetModalPromptContent = "stpreset:modal-prompt-content"
 	stPresetModalRegexAdd      = "stpreset:modal-regex-add"
 	stPresetModalRegexImport   = "stpreset:modal-regex-import"
 
-	stPresetFieldPath             = "stpreset:field-path"
 	stPresetFieldCharName         = "stpreset:field-char-name"
 	stPresetFieldCharDescription  = "stpreset:field-char-description"
 	stPresetFieldCharPersonality  = "stpreset:field-char-personality"
@@ -63,7 +61,7 @@ const (
 	stPresetFieldRegexReplace     = "stpreset:field-regex-replace"
 	stPresetFieldRegexImport      = "stpreset:field-regex-import"
 	stPresetFieldValueLimit       = 4000
-	stPresetPathPreviewRunes      = 180
+	stPresetSourcePreviewRunes    = 180
 	stPresetContentPreviewRunes   = 900
 	stPresetDialoguePreviewRunes  = 360
 	stPresetPresetSummaryRunes    = 500
@@ -78,6 +76,8 @@ const (
 
 type presetState struct {
 	Enabled            bool                      `json:"enabled"`
+	PresetName         string                    `json:"preset_name,omitempty"`
+	PresetJSON         string                    `json:"preset_json,omitempty"`
 	PresetPath         string                    `json:"preset_path,omitempty"`
 	CharName           string                    `json:"char_name,omitempty"`
 	CharDescription    string                    `json:"char_description,omitempty"`
@@ -116,7 +116,36 @@ func (p *presetPlugin) OnSlashCommand(ctx context.Context, host *pluginapi.HostC
 	if strings.TrimSpace(scope.GuildID) == "" {
 		return ephemeralText("酒馆预设面板只能在服务器频道或子区中使用。"), nil
 	}
-	message, err := p.buildPanel(ctx, host, scope, request.User, "")
+
+	notice := ""
+	if attachment := presetImportAttachment(request.Options); attachment != nil {
+		if !request.User.IsAdmin {
+			notice = "你没有权限导入预设文件。"
+		} else {
+			state, err := loadPresetState(ctx, host, scope)
+			if err != nil {
+				return nil, err
+			}
+			imported, err := p.importPresetAttachment(ctx, attachment)
+			if err != nil {
+				notice = "预设导入失败: " + shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes)
+			} else {
+				state.PresetName = imported.Name
+				state.PresetJSON = imported.JSON
+				state.PresetPath = ""
+				if strings.TrimSpace(state.CharName) == "" {
+					state.CharName = inferCharName(imported.Preset, imported.Name)
+				}
+				state.UpdatedAt = time.Now().Format(time.RFC3339)
+				if err := savePresetState(ctx, host, scope, state); err != nil {
+					return nil, err
+				}
+				notice = fmt.Sprintf("已导入预设文件 `%s`。", imported.Name)
+			}
+		}
+	}
+
+	message, err := p.buildPanel(ctx, host, scope, request.User, notice)
 	if err != nil {
 		return nil, err
 	}
@@ -145,16 +174,15 @@ func (p *presetPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClie
 
 	switch action {
 	case stPresetActionEnable:
-		if strings.TrimSpace(state.PresetPath) == "" {
-			return p.panelUpdate(ctx, host, scope, request.User, state, "请先配置预设 JSON 文件路径。")
+		if !state.hasPresetSource() {
+			return p.panelUpdate(ctx, host, scope, request.User, state, "请先使用 `/preset` 上传预设 JSON 文件。")
 		}
-		resolved, preset, err := p.loadPreset(state.PresetPath)
+		source, preset, err := p.loadPresetForState(state)
 		if err != nil {
 			return p.panelUpdate(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
 		}
 		state.Enabled = true
-		state.PresetPath = resolved
-		state.CharName = firstNonEmpty(state.CharName, inferCharName(preset, resolved))
+		state.CharName = firstNonEmpty(state.CharName, inferCharName(preset, source))
 		state.UpdatedAt = time.Now().Format(time.RFC3339)
 		if err := savePresetState(ctx, host, scope, state); err != nil {
 			return nil, err
@@ -167,11 +195,8 @@ func (p *presetPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClie
 			return nil, err
 		}
 		return p.panelUpdate(ctx, host, scope, request.User, state, "已关闭当前作用域的酒馆预设。")
-	case stPresetActionEditFile:
-		return &pluginapi.InteractionResponse{
-			Type:  pluginapi.InteractionResponseTypeModal,
-			Modal: buildPresetFileModal(state),
-		}, nil
+	case stPresetActionImportHelp:
+		return p.panelUpdate(ctx, host, scope, request.User, state, "请重新执行 `/preset`，并在 `preset_file` 选项里上传 SillyTavern 预设 JSON 文件。")
 	case stPresetActionEditContent:
 		return &pluginapi.InteractionResponse{
 			Type:  pluginapi.InteractionResponseTypeModal,
@@ -221,11 +246,10 @@ func (p *presetPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClie
 		}
 		return p.panelUpdate(ctx, host, scope, request.User, state, "已切换当前正则选择。")
 	case stPresetActionPromptToggle:
-		resolved, preset, err := p.loadPreset(state.PresetPath)
+		_, preset, err := p.loadPresetForState(state)
 		if err != nil {
 			return p.panelUpdate(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
 		}
-		state.PresetPath = resolved
 		view := buildPresetEditorView(state, preset)
 		item, ok := selectedPrompt(view, &state)
 		if !ok {
@@ -240,11 +264,10 @@ func (p *presetPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClie
 		}
 		return p.panelUpdate(ctx, host, scope, request.User, state, fmt.Sprintf("已将条目 `%s` 设置为%s。", item.Identifier, promptEnabledText(next)))
 	case stPresetActionPromptMoveUp, stPresetActionPromptMoveDown:
-		resolved, preset, err := p.loadPreset(state.PresetPath)
+		_, preset, err := p.loadPresetForState(state)
 		if err != nil {
 			return p.panelUpdate(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
 		}
-		state.PresetPath = resolved
 		view := buildPresetEditorView(state, preset)
 		item, ok := selectedPrompt(view, &state)
 		if !ok {
@@ -260,11 +283,10 @@ func (p *presetPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClie
 		}
 		return p.panelUpdate(ctx, host, scope, request.User, state, fmt.Sprintf("已调整条目 `%s` 的渲染位置。", item.Identifier))
 	case stPresetActionPromptEditMeta:
-		resolved, preset, err := p.loadPreset(state.PresetPath)
+		_, preset, err := p.loadPresetForState(state)
 		if err != nil {
 			return p.panelUpdate(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
 		}
-		state.PresetPath = resolved
 		view := buildPresetEditorView(state, preset)
 		item, ok := selectedPrompt(view, &state)
 		if !ok {
@@ -275,11 +297,10 @@ func (p *presetPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClie
 			Modal: buildPromptMetaModal(item),
 		}, nil
 	case stPresetActionPromptEditContent:
-		resolved, preset, err := p.loadPreset(state.PresetPath)
+		_, preset, err := p.loadPresetForState(state)
 		if err != nil {
 			return p.panelUpdate(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
 		}
-		state.PresetPath = resolved
 		view := buildPresetEditorView(state, preset)
 		item, ok := selectedPrompt(view, &state)
 		if !ok {
@@ -297,8 +318,8 @@ func (p *presetPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClie
 		}
 		return p.panelUpdate(ctx, host, scope, request.User, state, fmt.Sprintf("已将正则总开关设置为%s。", boolIcon(enabled)))
 	case stPresetActionRegexToggle:
-		_, preset, err := p.loadPreset(state.PresetPath)
-		if err != nil && strings.TrimSpace(state.PresetPath) != "" {
+		_, preset, err := p.loadPresetForState(state)
+		if err != nil && state.hasPresetSource() {
 			return p.panelUpdate(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
 		}
 		view := buildPresetEditorView(state, preset)
@@ -332,8 +353,8 @@ func (p *presetPlugin) OnComponent(ctx context.Context, host *pluginapi.HostClie
 			Modal: buildRegexImportModal(),
 		}, nil
 	case stPresetActionRegexDelete:
-		_, preset, err := p.loadPreset(state.PresetPath)
-		if err != nil && strings.TrimSpace(state.PresetPath) != "" {
+		_, preset, err := p.loadPresetForState(state)
+		if err != nil && state.hasPresetSource() {
 			return p.panelUpdate(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
 		}
 		view := buildPresetEditorView(state, preset)
@@ -385,26 +406,8 @@ func (p *presetPlugin) OnModal(ctx context.Context, host *pluginapi.HostClient, 
 	}
 
 	switch strings.TrimSpace(request.CustomID) {
-	case stPresetModalFile:
-		pathInput := strings.TrimSpace(request.Fields[stPresetFieldPath])
-		if pathInput == "" {
-			return p.panelMessage(ctx, host, scope, request.User, state, "预设 JSON 文件路径不能为空。")
-		}
-		resolved, preset, err := p.loadPreset(pathInput)
-		if err != nil {
-			return p.panelMessage(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
-		}
-		state.PresetPath = resolved
-		state.CharName = strings.TrimSpace(request.Fields[stPresetFieldCharName])
-		if state.CharName == "" {
-			state.CharName = inferCharName(preset, resolved)
-		}
-		state.UpdatedAt = time.Now().Format(time.RFC3339)
-		if err := savePresetState(ctx, host, scope, state); err != nil {
-			return nil, err
-		}
-		return p.panelMessage(ctx, host, scope, request.User, state, "已更新预设文件与角色名。")
 	case stPresetModalContent:
+		state.CharName = strings.TrimSpace(request.Fields[stPresetFieldCharName])
 		state.CharDescription = strings.TrimSpace(request.Fields[stPresetFieldCharDescription])
 		state.CharPersonality = strings.TrimSpace(request.Fields[stPresetFieldCharPersonality])
 		state.Scenario = strings.TrimSpace(request.Fields[stPresetFieldScenario])
@@ -416,11 +419,10 @@ func (p *presetPlugin) OnModal(ctx context.Context, host *pluginapi.HostClient, 
 		}
 		return p.panelMessage(ctx, host, scope, request.User, state, "已更新当前作用域的预设内容参数。")
 	case stPresetModalPromptMeta:
-		resolved, preset, err := p.loadPreset(state.PresetPath)
+		_, preset, err := p.loadPresetForState(state)
 		if err != nil {
 			return p.panelMessage(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
 		}
-		state.PresetPath = resolved
 		view := buildPresetEditorView(state, preset)
 		item, ok := selectedPrompt(view, &state)
 		if !ok {
@@ -451,11 +453,10 @@ func (p *presetPlugin) OnModal(ctx context.Context, host *pluginapi.HostClient, 
 		}
 		return p.panelMessage(ctx, host, scope, request.User, state, fmt.Sprintf("已更新条目 `%s` 的名称、触发器与位置。", item.Identifier))
 	case stPresetModalPromptContent:
-		resolved, preset, err := p.loadPreset(state.PresetPath)
+		_, preset, err := p.loadPresetForState(state)
 		if err != nil {
 			return p.panelMessage(ctx, host, scope, request.User, state, "预设读取失败: "+shared.TruncateRunes(err.Error(), stPresetPresetValidationRunes))
 		}
-		state.PresetPath = resolved
 		view := buildPresetEditorView(state, preset)
 		item, ok := selectedPrompt(view, &state)
 		if !ok {
@@ -578,17 +579,16 @@ func (p *presetPlugin) OnContextBuild(ctx context.Context, host *pluginapi.HostC
 	if err != nil {
 		return nil, err
 	}
-	if !state.Enabled || strings.TrimSpace(state.PresetPath) == "" {
+	if !state.Enabled || !state.hasPresetSource() {
 		return nil, nil
 	}
 
-	resolved, preset, err := p.loadPreset(state.PresetPath)
+	source, preset, err := p.loadPresetForState(state)
 	if err != nil {
 		return nil, err
 	}
-	state.PresetPath = resolved
 	if state.CharName == "" {
-		state.CharName = inferCharName(preset, resolved)
+		state.CharName = inferCharName(preset, source)
 	}
 
 	channelID := conversationChannelID(request.CurrentMessage.Channel)
@@ -648,20 +648,19 @@ func (p *presetPlugin) buildPanel(ctx context.Context, host *pluginapi.HostClien
 	state = normalizePresetState(state)
 
 	presetStatus := "未设置"
-	presetPreview := "当前还没有配置预设文件路径。"
+	presetPreview := "当前还没有导入预设文件。"
 	view := presetEditorView{}
-	if path := strings.TrimSpace(state.PresetPath); path != "" {
-		resolved, preset, loadErr := p.loadPreset(path)
+	if state.hasPresetSource() {
+		source, preset, loadErr := p.loadPresetForState(state)
 		if loadErr != nil {
 			presetStatus = "读取失败"
 			presetPreview = shared.TruncateRunes(loadErr.Error(), stPresetPresetSummaryRunes)
 		} else {
 			presetStatus = "可用"
-			state.PresetPath = resolved
-			presetPreview = buildPresetSummary(preset, resolved)
+			presetPreview = buildPresetSummary(preset, source)
 			view = buildPresetEditorView(state, preset)
 			if state.CharName == "" {
-				state.CharName = inferCharName(preset, resolved)
+				state.CharName = inferCharName(preset, source)
 			}
 		}
 	}
@@ -669,6 +668,7 @@ func (p *presetPlugin) buildPanel(ctx context.Context, host *pluginapi.HostClien
 	descriptionLines := []string{
 		"使用 SillyTavern 风格的 JSON 预设接管当前作用域的提示词拼装。",
 		"启用后将替换宿主原生的 system prompt 与 persona prompt，并按预设顺序组装上下文。",
+		"导入方式：重新执行 `/preset`，并在 `preset_file` 选项里上传预设 JSON 文件。",
 	}
 	if !user.IsAdmin {
 		descriptionLines = append(descriptionLines, "你当前只有查看权限。")
@@ -722,7 +722,7 @@ func (p *presetPlugin) buildPanel(ctx context.Context, host *pluginapi.HostClien
 					{Name: "当前作用域", Value: scopeLabel(scope), Inline: false},
 					{Name: "当前状态", Value: presetEnabledLabel(state.Enabled), Inline: true},
 					{Name: "预设校验", Value: presetStatus, Inline: true},
-					{Name: "预设文件", Value: presetPathPreview(state.PresetPath), Inline: false},
+					{Name: "预设来源", Value: presetSourcePreview(state), Inline: false},
 					{Name: "预设摘要", Value: presetPreview, Inline: false},
 					{Name: "角色名", Value: valueOrFallback(state.CharName, "未设置"), Inline: true},
 					{Name: "角色卡参数", Value: roleCard, Inline: false},
@@ -754,9 +754,9 @@ func (p *presetPlugin) buildPanel(ctx context.Context, host *pluginapi.HostClien
 		Components: []pluginapi.ActionRow{
 			{
 				Buttons: []pluginapi.Button{
-					{CustomID: stPresetActionEnable, Label: "启用", Style: "success", Disabled: !user.IsAdmin || state.Enabled},
+					{CustomID: stPresetActionEnable, Label: "启用", Style: "success", Disabled: !user.IsAdmin || state.Enabled || !state.hasPresetSource()},
 					{CustomID: stPresetActionDisable, Label: "停用", Style: "danger", Disabled: !user.IsAdmin || !state.Enabled},
-					{CustomID: stPresetActionEditFile, Label: "编辑文件", Style: "primary", Disabled: !user.IsAdmin},
+					{CustomID: stPresetActionImportHelp, Label: "导入说明", Style: "secondary", Disabled: false},
 					{CustomID: stPresetActionEditContent, Label: "编辑内容", Style: "primary", Disabled: !user.IsAdmin},
 					{CustomID: stPresetActionClear, Label: "清空", Style: "danger", Disabled: !user.IsAdmin},
 				},
@@ -793,37 +793,19 @@ func (p *presetPlugin) buildPanel(ctx context.Context, host *pluginapi.HostClien
 	}, nil
 }
 
-func buildPresetFileModal(state presetState) *pluginapi.ModalResponse {
-	return &pluginapi.ModalResponse{
-		CustomID: stPresetModalFile,
-		Title:    "编辑预设文件",
-		Fields: []pluginapi.ModalField{
-			{
-				CustomID:    stPresetFieldPath,
-				Label:       "预设 JSON 路径",
-				Style:       "short",
-				Placeholder: "填写绝对路径或相对插件工作目录的路径",
-				Value:       limitFieldValue(state.PresetPath),
-				Required:    true,
-				MaxLength:   stPresetFieldValueLimit,
-			},
-			{
-				CustomID:    stPresetFieldCharName,
-				Label:       "角色名 {{char}}",
-				Style:       "short",
-				Placeholder: "留空则回退为预设文件名",
-				Value:       limitFieldValue(state.CharName),
-				MaxLength:   256,
-			},
-		},
-	}
-}
-
 func buildPresetContentModal(state presetState) *pluginapi.ModalResponse {
 	return &pluginapi.ModalResponse{
 		CustomID: stPresetModalContent,
 		Title:    "编辑预设内容",
 		Fields: []pluginapi.ModalField{
+			{
+				CustomID:    stPresetFieldCharName,
+				Label:       "角色名 {{char}}",
+				Style:       "short",
+				Placeholder: "留空则回退为导入文件名",
+				Value:       limitFieldValue(state.CharName),
+				MaxLength:   256,
+			},
 			{
 				CustomID:    stPresetFieldCharDescription,
 				Label:       "角色描述 charDescription",
@@ -1096,12 +1078,15 @@ func previewInlineField(value string) string {
 	return shared.TruncateRunes(shared.SingleLine(value), stPresetComponentPreviewRunes)
 }
 
-func presetPathPreview(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "未设置"
+func presetSourcePreview(state presetState) string {
+	switch {
+	case strings.TrimSpace(state.PresetName) != "":
+		return "```text\n" + shared.TruncateRunes(strings.TrimSpace(state.PresetName), stPresetSourcePreviewRunes) + "\n```"
+	case strings.TrimSpace(state.PresetPath) != "":
+		return "```text\n" + shared.TruncateRunes(strings.TrimSpace(state.PresetPath), stPresetSourcePreviewRunes) + "\n```"
+	default:
+		return "未导入"
 	}
-	return "```text\n" + shared.TruncateRunes(path, stPresetPathPreviewRunes) + "\n```"
 }
 
 func presetEnabledLabel(enabled bool) string {
@@ -1189,7 +1174,6 @@ func presetActionRequiresAdmin(action string) bool {
 	switch strings.TrimSpace(action) {
 	case stPresetActionEnable,
 		stPresetActionDisable,
-		stPresetActionEditFile,
 		stPresetActionEditContent,
 		stPresetActionClear,
 		stPresetActionPromptToggle,

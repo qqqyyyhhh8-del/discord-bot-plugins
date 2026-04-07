@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -55,12 +56,25 @@ type orderedPromptEntry struct {
 }
 
 type cachedPreset struct {
-	ModTime time.Time
-	Size    int64
-	Preset  stPreset
+	Signature string
+	ModTime   time.Time
+	Size      int64
+	Preset    stPreset
 }
 
-func (p *presetPlugin) loadPreset(path string) (string, stPreset, error) {
+func (p *presetPlugin) loadPresetForState(state presetState) (string, stPreset, error) {
+	state = normalizePresetState(state)
+	switch {
+	case state.hasInlinePreset():
+		return p.loadPresetPayload(firstNonEmpty(state.PresetName, "imported-preset.json"), state.PresetJSON)
+	case strings.TrimSpace(state.PresetPath) != "":
+		return p.loadPresetPath(state.PresetPath)
+	default:
+		return "", stPreset{}, fmt.Errorf("preset is not configured")
+	}
+}
+
+func (p *presetPlugin) loadPresetPath(path string) (string, stPreset, error) {
 	resolved, err := resolvePresetPath(path)
 	if err != nil {
 		return "", stPreset{}, err
@@ -75,7 +89,7 @@ func (p *presetPlugin) loadPreset(path string) (string, stPreset, error) {
 	}
 
 	p.mu.Lock()
-	if cached, ok := p.loaded[resolved]; ok && cached.Size == info.Size() && cached.ModTime.Equal(info.ModTime()) {
+	if cached, ok := p.loaded[resolved]; ok && cached.Signature == resolved && cached.Size == info.Size() && cached.ModTime.Equal(info.ModTime()) {
 		p.mu.Unlock()
 		return resolved, cached.Preset, nil
 	}
@@ -86,22 +100,65 @@ func (p *presetPlugin) loadPreset(path string) (string, stPreset, error) {
 		return "", stPreset{}, err
 	}
 
-	var preset stPreset
-	if err := json.Unmarshal(payload, &preset); err != nil {
+	preset, err := decodePresetPayload(payload)
+	if err != nil {
 		return "", stPreset{}, err
-	}
-	if len(preset.Prompts) == 0 {
-		return "", stPreset{}, fmt.Errorf("preset contains no prompts")
 	}
 
 	p.mu.Lock()
 	p.loaded[resolved] = cachedPreset{
-		ModTime: info.ModTime(),
-		Size:    info.Size(),
-		Preset:  preset,
+		Signature: resolved,
+		ModTime:   info.ModTime(),
+		Size:      info.Size(),
+		Preset:    preset,
 	}
 	p.mu.Unlock()
 	return resolved, preset, nil
+}
+
+func (p *presetPlugin) loadPresetPayload(name, payload string) (string, stPreset, error) {
+	payload = strings.TrimSpace(payload)
+	if payload == "" {
+		return "", stPreset{}, fmt.Errorf("preset payload is empty")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "imported-preset.json"
+	}
+	checksum := sha256.Sum256([]byte(payload))
+	cacheKey := fmt.Sprintf("inline:%x", checksum)
+
+	p.mu.Lock()
+	if cached, ok := p.loaded[cacheKey]; ok && cached.Signature == cacheKey {
+		p.mu.Unlock()
+		return name, cached.Preset, nil
+	}
+	p.mu.Unlock()
+
+	preset, err := decodePresetPayload([]byte(payload))
+	if err != nil {
+		return "", stPreset{}, err
+	}
+
+	p.mu.Lock()
+	p.loaded[cacheKey] = cachedPreset{
+		Signature: cacheKey,
+		Size:      int64(len(payload)),
+		Preset:    preset,
+	}
+	p.mu.Unlock()
+	return name, preset, nil
+}
+
+func decodePresetPayload(payload []byte) (stPreset, error) {
+	var preset stPreset
+	if err := json.Unmarshal(payload, &preset); err != nil {
+		return stPreset{}, err
+	}
+	if len(preset.Prompts) == 0 {
+		return stPreset{}, fmt.Errorf("preset contains no prompts")
+	}
+	return preset, nil
 }
 
 func resolvePresetPath(path string) (string, error) {

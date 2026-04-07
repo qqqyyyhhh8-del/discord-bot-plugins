@@ -18,7 +18,14 @@
   "commands": [
     {
       "name": "preset",
-      "description": "Open the SillyTavern preset control panel."
+      "description": "Open the SillyTavern preset control panel.",
+      "options": [
+        {
+          "name": "preset_file",
+          "description": "Upload a SillyTavern preset JSON file to import.",
+          "type": "attachment"
+        }
+      ]
     }
   ],
   "component_prefixes": [

@@ -82,6 +82,7 @@ const (
 	CommandOptionTypeUser       CommandOptionType = "user"
 	CommandOptionTypeChannel    CommandOptionType = "channel"
 	CommandOptionTypeRole       CommandOptionType = "role"
+	CommandOptionTypeAttachment CommandOptionType = "attachment"
 	CommandOptionTypeSubcommand CommandOptionType = "subcommand"
 )
 
@@ -166,7 +167,7 @@ func validateCommandOptions(options []CommandOption) error {
 	names := make(map[string]struct{}, len(options))
 	for _, option := range options {
 		switch option.Type {
-		case CommandOptionTypeString, CommandOptionTypeInteger, CommandOptionTypeNumber, CommandOptionTypeBoolean, CommandOptionTypeUser, CommandOptionTypeChannel, CommandOptionTypeRole, CommandOptionTypeSubcommand:
+		case CommandOptionTypeString, CommandOptionTypeInteger, CommandOptionTypeNumber, CommandOptionTypeBoolean, CommandOptionTypeUser, CommandOptionTypeChannel, CommandOptionTypeRole, CommandOptionTypeAttachment, CommandOptionTypeSubcommand:
 		default:
 			return fmt.Errorf("unsupported command option type: %s", option.Type)
 		}
@@ -266,6 +267,14 @@ type InitializeRequest struct {
 
 type ShutdownRequest struct{}
 
+type AttachmentInfo struct {
+	ID          string `json:"id,omitempty"`
+	Name        string `json:"name,omitempty"`
+	URL         string `json:"url,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	Size        int    `json:"size,omitempty"`
+}
+
 type CommandOptionValue struct {
 	Name         string               `json:"name"`
 	Type         CommandOptionType    `json:"type"`
@@ -276,6 +285,7 @@ type CommandOptionValue struct {
 	UserID       string               `json:"user_id,omitempty"`
 	ChannelID    string               `json:"channel_id,omitempty"`
 	RoleID       string               `json:"role_id,omitempty"`
+	Attachment   *AttachmentInfo      `json:"attachment,omitempty"`
 	Options      []CommandOptionValue `json:"options,omitempty"`
 }
 

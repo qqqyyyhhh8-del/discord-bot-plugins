@@ -63,6 +63,8 @@ type presetEditorView struct {
 }
 
 func normalizePresetState(state presetState) presetState {
+	state.PresetName = strings.TrimSpace(state.PresetName)
+	state.PresetJSON = strings.TrimSpace(state.PresetJSON)
 	state.PresetPath = strings.TrimSpace(state.PresetPath)
 	state.CharName = strings.TrimSpace(state.CharName)
 	state.CharDescription = strings.TrimSpace(state.CharDescription)
@@ -112,6 +114,14 @@ func normalizePresetState(state presetState) presetState {
 		state.RegexPage = 0
 	}
 	return state
+}
+
+func (s presetState) hasInlinePreset() bool {
+	return strings.TrimSpace(s.PresetJSON) != ""
+}
+
+func (s presetState) hasPresetSource() bool {
+	return s.hasInlinePreset() || strings.TrimSpace(s.PresetPath) != ""
 }
 
 func buildPresetEditorView(state presetState, preset stPreset) presetEditorView {
