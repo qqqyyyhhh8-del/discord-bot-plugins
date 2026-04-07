@@ -1,0 +1,27 @@
+{
+  "id": "official_stpreset",
+  "name": "Official SillyTavern Preset Plugin",
+  "version": "v0.1.0",
+  "description": "Use SillyTavern-style preset JSON files to fully control prompt assembly for the current scope.",
+  "min_host_version": "v0.6.3",
+  "runtime": {
+    "command": "go",
+    "args": ["run", "./cmd/stpreset-plugin"]
+  },
+  "capabilities": [
+    "plugin.storage",
+    "discord.interaction.respond",
+    "context.provide",
+    "memory.read",
+    "memory.write"
+  ],
+  "commands": [
+    {
+      "name": "preset",
+      "description": "Open the SillyTavern preset control panel."
+    }
+  ],
+  "component_prefixes": [
+    "stpreset:"
+  ]
+}
